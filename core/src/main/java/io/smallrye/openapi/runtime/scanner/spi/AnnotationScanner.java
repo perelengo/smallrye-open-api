@@ -6,10 +6,12 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Map.Entry;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
@@ -20,6 +22,7 @@ import org.eclipse.microprofile.openapi.models.OpenAPI;
 import org.eclipse.microprofile.openapi.models.Operation;
 import org.eclipse.microprofile.openapi.models.PathItem;
 import org.eclipse.microprofile.openapi.models.callbacks.Callback;
+import org.eclipse.microprofile.openapi.models.info.Info;
 import org.eclipse.microprofile.openapi.models.media.Content;
 import org.eclipse.microprofile.openapi.models.media.MediaType;
 import org.eclipse.microprofile.openapi.models.media.Schema;
@@ -34,11 +37,17 @@ import org.eclipse.microprofile.openapi.models.tags.Tag;
 import org.jboss.jandex.AnnotationInstance;
 import org.jboss.jandex.AnnotationTarget;
 import org.jboss.jandex.ClassInfo;
+import org.jboss.jandex.ClassType;
 import org.jboss.jandex.DotName;
 import org.jboss.jandex.MethodInfo;
+import org.jboss.jandex.MethodParameterInfo;
 import org.jboss.jandex.ParameterizedType;
 import org.jboss.jandex.Type;
 import org.jboss.jandex.Type.Kind;
+
+import com.github.therapi.runtimejavadoc.ClassJavadoc;
+import com.github.therapi.runtimejavadoc.MethodJavadoc;
+import com.github.therapi.runtimejavadoc.ParamJavadoc;
 
 import io.smallrye.openapi.api.OpenApiConfig.DuplicateOperationIdBehavior;
 import io.smallrye.openapi.api.OpenApiConfig.OperationIdStrategy;
@@ -47,6 +56,7 @@ import io.smallrye.openapi.api.constants.KotlinConstants;
 import io.smallrye.openapi.api.constants.OpenApiConstants;
 import io.smallrye.openapi.api.constants.SecurityConstants;
 import io.smallrye.openapi.api.models.OperationImpl;
+import io.smallrye.openapi.api.models.info.InfoImpl;
 import io.smallrye.openapi.api.models.media.ContentImpl;
 import io.smallrye.openapi.api.models.media.MediaTypeImpl;
 import io.smallrye.openapi.api.models.media.SchemaImpl;
@@ -72,6 +82,7 @@ import io.smallrye.openapi.runtime.scanner.dataobject.AugmentedIndexView;
 import io.smallrye.openapi.runtime.scanner.dataobject.BeanValidationScanner;
 import io.smallrye.openapi.runtime.scanner.processor.JavaSecurityProcessor;
 import io.smallrye.openapi.runtime.util.JandexUtil;
+import io.smallrye.openapi.runtime.util.JavadocUtils;
 import io.smallrye.openapi.runtime.util.ModelUtil;
 import io.smallrye.openapi.runtime.util.TypeUtil;
 
@@ -140,10 +151,14 @@ public interface AnnotationScanner {
      * @param openApi the current OpenApi model being created
      */
     default void processDefinitionAnnotation(final AnnotationScannerContext context, final ClassInfo targetClass,
-            OpenAPI openApi) {
+            OpenAPI openApi, ClassJavadoc classJavadoc) {
         AnnotationInstance openApiDefAnno = DefinitionReader.getDefinitionAnnotation(context, targetClass);
         if (openApiDefAnno != null) {
             DefinitionReader.processDefinition(context, openApi, openApiDefAnno);
+        } else {
+            Info info = new InfoImpl();
+            info.setDescription(classJavadoc.getComment().toString());
+            openApi.setInfo(info);
         }
     }
 
@@ -305,16 +320,18 @@ public interface AnnotationScanner {
      * @param context the scanning context
      * @param resourceClass the JAX-RS/Spring concrete resource class
      * @param method the JAX-RS/Spring method
+     * @param methodJavaDoc
      * @return Maybe an Operation model
      */
     default Optional<Operation> processOperation(final AnnotationScannerContext context,
             final ClassInfo resourceClass,
-            final MethodInfo method) {
+            final MethodInfo method, Optional<MethodJavadoc> methodJavaDoc) {
         if (OperationReader.operationIsHidden(method)) {
             return Optional.empty();
         }
         AnnotationInstance operationAnnotation = OperationReader.getOperationAnnotation(method);
-        OperationImpl operation = (OperationImpl) OperationReader.readOperation(context, operationAnnotation, method);
+        OperationImpl operation = (OperationImpl) OperationReader.readOperation(context, operationAnnotation, method,
+                methodJavaDoc);
 
         if (operation == null) {
             operation = new OperationImpl();
@@ -395,7 +412,7 @@ public interface AnnotationScanner {
 
     default void processResponse(final AnnotationScannerContext context, final ClassInfo resourceClass, final MethodInfo method,
             Operation operation,
-            Map<DotName, List<AnnotationInstance>> exceptionAnnotationMap) {
+            Map<DotName, List<AnnotationInstance>> exceptionAnnotationMap, Optional<MethodJavadoc> methodJavaDoc) {
 
         setJsonViewContext(context, context.annotations().getAnnotationValue(method, JacksonConstants.JSON_VIEW));
 
@@ -411,7 +428,7 @@ public interface AnnotationScanner {
         }
 
         AnnotationInstance responseSchemaAnnotation = ResponseReader.getResponseSchemaAnnotation(method);
-        addApiReponseSchemaFromAnnotation(context, responseSchemaAnnotation, method, operation);
+        addApiReponseSchemaFromAnnotation(context, responseSchemaAnnotation, method, operation, methodJavaDoc);
 
         /*
          * If there is no response from annotations, try to create one from the method return value.
@@ -421,7 +438,7 @@ public interface AnnotationScanner {
          */
         AnnotationInstance apiResponses = ResponseReader.getResponsesAnnotation(method);
         if (apiResponses == null || !JandexUtil.isEmpty(apiResponses)) {
-            createResponseFromRestMethod(context, method, operation);
+            createResponseFromRestMethod(context, method, operation, methodJavaDoc, Optional.empty(), true);
         }
 
         if (apiResponses != null) {
@@ -429,16 +446,64 @@ public interface AnnotationScanner {
         }
 
         //Add api response using list of exceptions in the methods and exception mappers
-        List<Type> methodExceptions = method.exceptions();
+        List<Type> methodExceptionsExplicit = method.exceptions();
+        ArrayList<Type> methodExceptions = new ArrayList<>();
+        methodExceptions.addAll(methodExceptionsExplicit);
+        methodExceptions.add(ClassType.create(DotName.createSimple(Throwable.class.getName())));
 
-        for (Type type : methodExceptions) {
-            DotName exceptionDotName = type.name();
-            if (exceptionAnnotationMap != null && !exceptionAnnotationMap.isEmpty()
-                    && exceptionAnnotationMap.containsKey(exceptionDotName)) {
-                for (AnnotationInstance exMapperApiResponseAnnotation : exceptionAnnotationMap.get(exceptionDotName)) {
+        for (Entry<DotName, List<AnnotationInstance>> exMapperApiResponseAnnotationEntrySet : exceptionAnnotationMap
+                .entrySet()) {
+
+            AnnotationInstance exMapperApiResponseAnnotation = exMapperApiResponseAnnotationEntrySet.getValue().get(0);
+            DotName exMapperApiResponseAnnotationKey = exMapperApiResponseAnnotationEntrySet.getKey();
+
+            methodExceptions.sort(new Comparator<Type>() {
+                @Override
+                public int compare(Type o1, Type o2) {
+                    try {
+                        return (context.getClassLoader()
+                                .loadClass(o1.name().toString()).isAssignableFrom(
+                                        context.getClassLoader()
+                                                .loadClass(o2.name().toString()))) ? 1 : -1;
+                    } catch (ClassNotFoundException e) {
+                        return 0;
+                    }
+                }
+            });
+            System.out.println("evaluating " + exMapperApiResponseAnnotationKey.toString());
+            Class exMapperExceptionClass;
+            try {
+                exMapperExceptionClass = context.getClassLoader()
+                        .loadClass(exMapperApiResponseAnnotationKey.toString());
+            } catch (ClassNotFoundException e) {
+                e.printStackTrace();
+                throw new RuntimeException(e);
+            }
+            for (Type type : methodExceptions) {
+                DotName exceptionDotName = type.name();
+                Class exceptionDotNameClass;
+                try {
+                    exceptionDotNameClass = context.getClassLoader().loadClass(exceptionDotName.toString());
+                } catch (ClassNotFoundException e) {
+                    e.printStackTrace();
+                    throw new RuntimeException(e);
+                }
+                System.out.println(exceptionAnnotationMap.containsKey(exceptionDotName) + "-" +
+                        exceptionDotNameClass.isAssignableFrom(exMapperExceptionClass));
+                if (exceptionAnnotationMap != null && !exceptionAnnotationMap.isEmpty()
+                        && (exceptionAnnotationMap.containsKey(exceptionDotName)
+                                || exceptionDotNameClass.isAssignableFrom(exMapperExceptionClass))) {
+
                     if (!this.responseCodeExistInMethodAnnotations(context, exMapperApiResponseAnnotation,
                             methodApiResponseAnnotations)) {
                         addApiReponseFromAnnotation(context, exMapperApiResponseAnnotation, operation);
+                        String populateExceptionsStr = System.getProperty("populateFullRepsonseCodes");
+                        Boolean populateExceptions = (populateExceptionsStr != null)
+                                ? Boolean.parseBoolean(populateExceptionsStr)
+                                : false;
+                        createResponseFromRestMethod(context, method, operation, methodJavaDoc,
+                                Optional.of(context.annotations().value(exMapperApiResponseAnnotation, "responseCode")),
+                                populateExceptions);
                     }
                 }
             }
@@ -462,16 +527,20 @@ public interface AnnotationScanner {
      * @param context the scanning context
      * @param method the current method
      * @param operation the current operation
+     * @param methodJavaDoc
+     * @param status
      */
     default void createResponseFromRestMethod(final AnnotationScannerContext context,
             final MethodInfo method,
-            Operation operation) {
+            Operation operation, Optional<MethodJavadoc> methodJavaDoc, Optional<String> exceptionStatus,
+            boolean populateExceptions) {
 
         Type returnType = context.getResourceTypeResolver().resolve(method.returnType());
         APIResponse response = null;
-        final int status = getDefaultStatus(method);
+        final int status = (exceptionStatus.isPresent()) ? Integer.parseInt(exceptionStatus.get().toString())
+                : getDefaultStatus(method);
         final String code = String.valueOf(status);
-        final String description = getReasonPhrase(status);
+        final String description = getReasonPhrase(status, methodJavaDoc);
 
         if (isVoidResponse(method)) {
             if (generateResponse(code, operation)) {
@@ -479,43 +548,44 @@ public interface AnnotationScanner {
             }
         } else if (generateResponse(code, operation)) {
             response = new APIResponseImpl().description(description);
+            if (status == 200 || populateExceptions) {
+                /*
+                 * Only generate content if not already supplied in annotations and the
+                 * method does not return an opaque Scanner Response
+                 */
+                if (!isScannerInternalResponse(returnType, context, method) &&
+                        (ModelUtil.responses(operation).getAPIResponse(code) == null ||
+                                ModelUtil.responses(operation).getAPIResponse(code).getContent() == null)) {
 
-            /*
-             * Only generate content if not already supplied in annotations and the
-             * method does not return an opaque Scanner Response
-             */
-            if (!isScannerInternalResponse(returnType, context, method) &&
-                    (ModelUtil.responses(operation).getAPIResponse(code) == null ||
-                            ModelUtil.responses(operation).getAPIResponse(code).getContent() == null)) {
+                    Schema schema;
 
-                Schema schema;
+                    if (isMultipartOutput(returnType)) {
+                        schema = new SchemaImpl().type(Schema.SchemaType.OBJECT);
+                    } else if (hasKotlinContinuation(method)) {
+                        schema = kotlinContinuationToSchema(context, method);
+                    } else {
+                        schema = SchemaFactory.typeToSchema(context, returnType, null, context.getExtensions());
+                    }
 
-                if (isMultipartOutput(returnType)) {
-                    schema = new SchemaImpl().type(Schema.SchemaType.OBJECT);
-                } else if (hasKotlinContinuation(method)) {
-                    schema = kotlinContinuationToSchema(context, method);
-                } else {
-                    schema = SchemaFactory.typeToSchema(context, returnType, null, context.getExtensions());
+                    Content content = new ContentImpl();
+                    String[] produces = context.getCurrentProduces();
+
+                    if (produces == null || produces.length == 0) {
+                        produces = getDefaultProduces(context, method);
+                    }
+
+                    if (schema != null && schema.getNullable() == null && TypeUtil.isOptional(returnType)) {
+                        schema.setNullable(Boolean.TRUE);
+                    }
+
+                    for (String producesType : produces) {
+                        MediaType mt = new MediaTypeImpl();
+                        mt.setSchema(schema);
+                        content.addMediaType(producesType, mt);
+                    }
+
+                    response.setContent(content);
                 }
-
-                Content content = new ContentImpl();
-                String[] produces = context.getCurrentProduces();
-
-                if (produces == null || produces.length == 0) {
-                    produces = getDefaultProduces(context, method);
-                }
-
-                if (schema != null && schema.getNullable() == null && TypeUtil.isOptional(returnType)) {
-                    schema.setNullable(Boolean.TRUE);
-                }
-
-                for (String producesType : produces) {
-                    MediaType mt = new MediaTypeImpl();
-                    mt.setSchema(schema);
-                    content.addMediaType(producesType, mt);
-                }
-
-                response.setContent(content);
             }
         }
 
@@ -662,7 +732,7 @@ public interface AnnotationScanner {
     default void addApiReponseSchemaFromAnnotation(AnnotationScannerContext context,
             AnnotationInstance annotation,
             MethodInfo method,
-            Operation operation) {
+            Operation operation, Optional<MethodJavadoc> methodJavadoc) {
 
         if (annotation == null) {
             return;
@@ -681,7 +751,7 @@ public interface AnnotationScanner {
         APIResponse response = ResponseReader.readResponseSchema(context, annotation);
 
         if (response.getDescription() == null) {
-            response.setDescription(getReasonPhrase(status));
+            response.setDescription(getReasonPhrase(status, methodJavadoc));
         }
 
         APIResponses responses = ModelUtil.responses(operation);
@@ -905,11 +975,12 @@ public interface AnnotationScanner {
      * @param context the current scanning context
      * @param method the resource method
      * @param params the params
+     * @param methodJavaDoc
      * @return RequestBody model
      */
     default RequestBody processRequestBody(final AnnotationScannerContext context,
             final MethodInfo method,
-            final ResourceParameters params) {
+            final ResourceParameters params, Optional<MethodJavadoc> methodJavaDoc) {
         RequestBody requestBody = null;
 
         List<AnnotationInstance> requestBodyAnnotations = RequestBodyReader.getRequestBodyAnnotations(context, method);
@@ -966,7 +1037,8 @@ public interface AnnotationScanner {
         // If the request body is null, figure it out from the parameters.  Only if the
         // method declares that it @Consumes data
         if ((requestBody == null || (requestBody.getContent() == null && requestBody.getRef() == null))
-                && getConsumes(context) != null) {
+        //PJR skip @consumes annotation by commenting here: && getConsumes(context) != null
+        ) {
             if (params.getFormBodyContent() != null) {
                 if (requestBody == null) {
                     requestBody = new RequestBodyImpl();
@@ -1005,7 +1077,19 @@ public interface AnnotationScanner {
                     if (requestBody.getRequired() == null && TypeUtil.isOptional(requestBodyType)) {
                         requestBody.setRequired(Boolean.FALSE);
                     }
+                    //PJR javax.validation.constraints.NotNull check
+                    if (context.annotations().getAnnotation(method,
+                            DotName.createSimple("javax.validation.constraints.NotNull")) != null) {
+                        requestBody.setRequired(Boolean.TRUE);
+                    }
 
+                    MethodParameterInfo param = getRequestBodyParameter(context, method, params);
+                    if (methodJavaDoc.isPresent()) {
+                        ParamJavadoc paramJavadoc = methodJavaDoc.get().getParams().stream()
+                                .filter(p -> JavadocUtils.matches(p, param)).findAny().orElse(null);
+                        if (paramJavadoc != null)
+                            requestBody.setDescription(paramJavadoc.getComment().toString());
+                    }
                     setRequestBodyConstraints(context, requestBody, method, requestBodyType);
                 }
             }
@@ -1045,11 +1129,28 @@ public interface AnnotationScanner {
     default Type getRequestBodyParameterClassType(final AnnotationScannerContext context, MethodInfo method,
             final ResourceParameters params) {
 
-        List<Type> methodParams = method.parameterTypes();
+        MethodParameterInfo parameter = getRequestBodyParameter(context, method, params);
+        return (parameter != null) ? parameter.type() : null;
+    }
+
+    /**
+     * Go through the method parameters looking for one that is not a Kotlin Continuation,
+     * is not annotated with a jax-rs/spring annotation, and is not a known path parameter.
+     * That will be the one that is the request body.
+     *
+     * @param context the scanning context
+     * @param method MethodInfo
+     * @param params the current parameters
+     * @return Type
+     */
+    default MethodParameterInfo getRequestBodyParameter(final AnnotationScannerContext context, MethodInfo method,
+            final ResourceParameters params) {
+
+        List<MethodParameterInfo> methodParams = method.parameters();
 
         return IntStream.range(0, methodParams.size())
-                .filter(position -> !isKotlinContinuation(methodParams.get(position)))
-                .filter(position -> !isFrameworkContextType(methodParams.get(position)))
+                .filter(position -> !isKotlinContinuation(methodParams.get(position).type()))
+                .filter(position -> !isFrameworkContextType(methodParams.get(position).type()))
                 .filter(position -> !isPathParameter(context, method.parameterName(position), params))
                 .filter(position -> {
                     List<AnnotationInstance> annotations = context.annotations().getMethodParameterAnnotations(method,
@@ -1116,9 +1217,10 @@ public interface AnnotationScanner {
      * Get the default description for a HTTP Status code
      *
      * @param statusCode
+     * @param methodJavaDoc
      * @return the reason
      */
-    default String getReasonPhrase(int statusCode) {
+    default String getReasonPhrase(int statusCode, Optional<MethodJavadoc> methodJavaDoc) {
         switch (statusCode) {
             case 100:
                 return "Continue";
@@ -1127,7 +1229,13 @@ public interface AnnotationScanner {
             case 102:
                 return "Processing";
             case 200:
-                return "OK";
+                if (methodJavaDoc.isPresent()) {
+                    return (methodJavaDoc.get().getReturns() != null && !methodJavaDoc.get().getReturns().toString().isEmpty())
+                            ? methodJavaDoc.get().getReturns().toString()
+                            : "OK";
+                } else {
+                    return "OK";
+                }
             case 201:
                 return "Created";
             case 202:

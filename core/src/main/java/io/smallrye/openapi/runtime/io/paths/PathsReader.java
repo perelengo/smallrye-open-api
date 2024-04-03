@@ -91,7 +91,7 @@ public class PathsReader {
             if (method == null) {
                 continue;
             }
-            Operation operation = OperationReader.readOperation(context, operationAnno, methodInfo);
+            Operation operation = OperationReader.readOperation(context, operationAnno, methodInfo, java.util.Optional.empty());
             try {
                 PropertyDescriptor descriptor = new PropertyDescriptor(method.toUpperCase(), pathItem.getClass());
                 Method mutator = descriptor.getWriteMethod();

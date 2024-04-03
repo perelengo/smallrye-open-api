@@ -1,10 +1,13 @@
 package io.smallrye.openapi.runtime.io.operation;
 
+import java.util.Optional;
+
 import org.eclipse.microprofile.openapi.models.Operation;
 import org.jboss.jandex.AnnotationInstance;
 import org.jboss.jandex.MethodInfo;
 
 import com.fasterxml.jackson.databind.JsonNode;
+import com.github.therapi.runtimejavadoc.MethodJavadoc;
 
 import io.smallrye.openapi.api.models.OperationImpl;
 import io.smallrye.openapi.runtime.io.IoLogging;
@@ -38,22 +41,24 @@ public class OperationReader {
      *
      * @param context the scanning context
      * @param methodInfo the method
+     * @param methodJavaDoc
      * @return Operation model
      */
     public static Operation readOperation(final AnnotationScannerContext context,
             final AnnotationInstance annotationInstance,
-            final MethodInfo methodInfo) {
+            final MethodInfo methodInfo, Optional<MethodJavadoc> methodJavaDoc) {
 
         if (annotationInstance != null) {
             IoLogging.logger.singleAnnotation("@Operation");
             Operation operation = new OperationImpl();
-            operation.setSummary(context.annotations().value(annotationInstance, OperationConstant.PROP_SUMMARY));
+            String annotationSummary = context.annotations().value(annotationInstance, OperationConstant.PROP_SUMMARY);
+            operation.setSummary(annotationSummary);
             operation.setDescription(context.annotations().value(annotationInstance, OperationConstant.PROP_DESCRIPTION));
             operation.setExternalDocs(
                     ExternalDocsReader.readExternalDocs(context,
                             annotationInstance.value(ExternalDocsConstant.PROP_EXTERNAL_DOCS)));
             operation.setParameters(ParameterReader.readParametersList(context,
-                    annotationInstance.value(OperationConstant.PROP_PARAMETERS)).orElse(null));
+                    annotationInstance.value(OperationConstant.PROP_PARAMETERS), methodJavaDoc, methodInfo).orElse(null));
             operation.setRequestBody(RequestBodyReader.readRequestBody(context,
                     annotationInstance.value(OperationConstant.PROP_REQUEST_BODY)));
             operation.setResponses(ResponseReader.readResponses(context,
@@ -72,7 +77,14 @@ public class OperationReader {
 
             return operation;
         } else {
-            return null;
+            Operation operation = new OperationImpl();
+            String javadocSummary = (methodJavaDoc != null && methodJavaDoc.isPresent())
+                    ? methodJavaDoc.get().getComment().toString()
+                    : null;
+            operation.setDescription(javadocSummary);
+            operation.setParameters(ParameterReader.readParametersList(context,
+                    null, methodJavaDoc, methodInfo).orElse(null));
+            return operation;
         }
     }
 

@@ -13,9 +13,13 @@ import org.eclipse.microprofile.openapi.annotations.enums.Explode;
 import org.eclipse.microprofile.openapi.models.parameters.Parameter;
 import org.jboss.jandex.AnnotationInstance;
 import org.jboss.jandex.AnnotationValue;
+import org.jboss.jandex.MethodInfo;
+import org.jboss.jandex.MethodParameterInfo;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.github.therapi.runtimejavadoc.MethodJavadoc;
+import com.github.therapi.runtimejavadoc.ParamJavadoc;
 
 import io.smallrye.openapi.api.models.parameters.ParameterImpl;
 import io.smallrye.openapi.runtime.io.ContentDirection;
@@ -30,6 +34,7 @@ import io.smallrye.openapi.runtime.io.schema.SchemaFactory;
 import io.smallrye.openapi.runtime.io.schema.SchemaReader;
 import io.smallrye.openapi.runtime.scanner.spi.AnnotationScannerContext;
 import io.smallrye.openapi.runtime.util.JandexUtil;
+import io.smallrye.openapi.runtime.util.JavadocUtils;
 
 /**
  * Reading the Parameter annotation
@@ -50,23 +55,44 @@ public class ParameterReader {
      *
      * @param context the scanning context
      * @param annotationValue Map of {@literal @}Parameter annotations
+     * @param methodJavadoc
+     * @param methodInfo
      * @return List of Parameter model
      */
     public static Optional<List<Parameter>> readParametersList(final AnnotationScannerContext context,
-            final AnnotationValue annotationValue) {
+            final AnnotationValue annotationValue, Optional<MethodJavadoc> methodJavadoc, MethodInfo methodInfo) {
         if (annotationValue != null) {
             IoLogging.logger.annotationsList("@Parameter");
             List<Parameter> parameters = new ArrayList<>();
             AnnotationInstance[] nestedArray = annotationValue.asNestedArray();
             for (AnnotationInstance nested : nestedArray) {
-                Parameter parameter = readParameter(context, nested);
+                Parameter parameter = readParameter(context, nested, methodJavadoc);
                 if (parameter != null) {
                     parameters.add(parameter);
                 }
             }
             return Optional.of(parameters);
+        } else {
+
+            ParameterImpl parameter = new ParameterImpl();
+            List<Parameter> parameters = new ArrayList<>();
+
+            for (MethodParameterInfo param : methodInfo.parameters()) {
+                parameters.add(parameter);
+                parameter.setName(parameter.getName());
+                if (methodJavadoc != null && methodJavadoc.isPresent()) {
+                    List<ParamJavadoc> paramsJavadoc = methodJavadoc.get().getParams();
+                    Optional<ParamJavadoc> paramJavadoc = paramsJavadoc.stream().filter(p -> {
+                        return JavadocUtils.matches(p, param);
+                    }).findAny();
+                    if (paramJavadoc.isPresent()) {
+                        String javadocDescription = paramJavadoc.get().getComment().toString();
+                        parameter.setDescription(javadocDescription);
+                    }
+                }
+            }
+            return Optional.of(parameters);
         }
-        return Optional.empty();
     }
 
     /**
@@ -93,29 +119,31 @@ public class ParameterReader {
      *
      * @param context the scanning context
      * @param annotationValue Map of {@literal @}Parameter annotations
+     * @param methodJavadoc
      * @return Map of Parameter model
      */
     public static Map<String, Parameter> readParameters(final AnnotationScannerContext context,
-            final AnnotationValue annotationValue) {
-        if (annotationValue == null) {
-            return null;
-        }
-        IoLogging.logger.annotationsMap("@Parameter");
-        Map<String, Parameter> parameters = new LinkedHashMap<>();
-        AnnotationInstance[] nestedArray = annotationValue.asNestedArray();
-        for (AnnotationInstance nested : nestedArray) {
-            String name = context.annotations().value(nested, Parameterizable.PROP_NAME);
-            if (name == null && JandexUtil.isRef(nested)) {
-                name = JandexUtil.nameFromRef(nested);
-            }
-            if (name != null) {
-                Parameter parameter = readParameter(context, nested);
-                if (parameter != null) {
-                    parameters.put(name, parameter);
+            final AnnotationValue annotationValue, Optional<MethodJavadoc> methodJavadoc) {
+        if (annotationValue != null) {
+            IoLogging.logger.annotationsMap("@Parameter");
+            Map<String, Parameter> parameters = new LinkedHashMap<>();
+            AnnotationInstance[] nestedArray = annotationValue.asNestedArray();
+            for (AnnotationInstance nested : nestedArray) {
+                String name = context.annotations().value(nested, Parameterizable.PROP_NAME);
+                if (name == null && JandexUtil.isRef(nested)) {
+                    name = JandexUtil.nameFromRef(nested);
+                }
+                if (name != null) {
+                    Parameter parameter = readParameter(context, nested, methodJavadoc);
+                    if (parameter != null) {
+                        parameters.put(name, parameter);
+                    }
                 }
             }
+            return parameters;
+        } else {
+            return null;
         }
-        return parameters;
     }
 
     /**
@@ -144,63 +172,67 @@ public class ParameterReader {
      *
      * @param context the scanning context
      * @param annotationInstance {@literal @}Parameter model
+     * @param methodJavadoc
      * @return Parameter model
      */
     public static Parameter readParameter(final AnnotationScannerContext context,
-            final AnnotationInstance annotationInstance) {
+            final AnnotationInstance annotationInstance, Optional<MethodJavadoc> methodJavadoc) {
 
-        if (annotationInstance == null) {
-            return null;
-        }
-        IoLogging.logger.singleAnnotation("@Parameter");
-        ParameterImpl parameter = new ParameterImpl();
-        parameter.setName(context.annotations().value(annotationInstance, Parameterizable.PROP_NAME));
-        parameter.setIn(context.annotations().enumValue(annotationInstance, ParameterConstant.PROP_IN, Parameter.In.class));
+        if (annotationInstance != null) {
+            IoLogging.logger.singleAnnotation("@Parameter");
+            ParameterImpl parameter = new ParameterImpl();
+            parameter.setName(context.annotations().value(annotationInstance, Parameterizable.PROP_NAME));
+            parameter.setIn(context.annotations().enumValue(annotationInstance, ParameterConstant.PROP_IN, Parameter.In.class));
 
-        // Params can be hidden. Skip if that's the case.
-        Boolean isHidden = context.annotations().value(annotationInstance, ParameterConstant.PROP_HIDDEN);
-        if (Boolean.TRUE.equals(isHidden)) {
-            ParameterImpl.setHidden(parameter, true);
-            return parameter;
-        }
-
-        parameter.setDescription(context.annotations().value(annotationInstance, Parameterizable.PROP_DESCRIPTION));
-        parameter.setRequired(context.annotations().value(annotationInstance, Parameterizable.PROP_REQUIRED));
-        parameter.setDeprecated(context.annotations().value(annotationInstance, Parameterizable.PROP_DEPRECATED));
-        parameter.setAllowEmptyValue(context.annotations().value(annotationInstance, Parameterizable.PROP_ALLOW_EMPTY_VALUE));
-        parameter.setStyle(
-                context.annotations().enumValue(annotationInstance, Parameterizable.PROP_STYLE, Parameter.Style.class));
-        parameter.setExplode(readExplode(context, annotationInstance));
-        parameter.setAllowReserved(context.annotations().value(annotationInstance, ParameterConstant.PROP_ALLOW_RESERVED));
-        parameter.setSchema(SchemaFactory.readSchema(context, annotationInstance.value(Parameterizable.PROP_SCHEMA)));
-        parameter.setContent(
-                ContentReader.readContent(context, annotationInstance.value(Parameterizable.PROP_CONTENT),
-                        ContentDirection.PARAMETER));
-        parameter.setExamples(ExampleReader.readExamples(context, annotationInstance.value(Parameterizable.PROP_EXAMPLES)));
-        parameter.setExample(
-                ExampleReader.parseValue(context,
-                        context.annotations().value(annotationInstance, Parameterizable.PROP_EXAMPLE)));
-        parameter.setRef(JandexUtil.refValue(annotationInstance, JandexUtil.RefType.PARAMETER));
-
-        if (annotationInstance.target() != null) {
-            switch (annotationInstance.target().kind()) {
-                case FIELD:
-                case METHOD_PARAMETER:
-                    /*
-                     * Limit to field and parameter. Extensions on methods are ambiguous and pertain
-                     * instead to the operation.
-                     *
-                     */
-                    parameter.setExtensions(ExtensionReader.readExtensions(context, annotationInstance));
-                    break;
-                default:
-                    break;
+            // Params can be hidden. Skip if that's the case.
+            Boolean isHidden = context.annotations().value(annotationInstance, ParameterConstant.PROP_HIDDEN);
+            if (Boolean.TRUE.equals(isHidden)) {
+                ParameterImpl.setHidden(parameter, true);
+                return parameter;
             }
 
-            parameter.setParamRef(JandexUtil.createUniqueAnnotationTargetRef(annotationInstance.target()));
-        }
+            String annotationDescription = context.annotations().value(annotationInstance, Parameterizable.PROP_DESCRIPTION);
+            parameter.setDescription(annotationDescription);
+            parameter.setRequired(context.annotations().value(annotationInstance, Parameterizable.PROP_REQUIRED));
+            parameter.setDeprecated(context.annotations().value(annotationInstance, Parameterizable.PROP_DEPRECATED));
+            parameter.setAllowEmptyValue(
+                    context.annotations().value(annotationInstance, Parameterizable.PROP_ALLOW_EMPTY_VALUE));
+            parameter.setStyle(
+                    context.annotations().enumValue(annotationInstance, Parameterizable.PROP_STYLE, Parameter.Style.class));
+            parameter.setExplode(readExplode(context, annotationInstance));
+            parameter.setAllowReserved(context.annotations().value(annotationInstance, ParameterConstant.PROP_ALLOW_RESERVED));
+            parameter.setSchema(SchemaFactory.readSchema(context, annotationInstance.value(Parameterizable.PROP_SCHEMA)));
+            parameter.setContent(
+                    ContentReader.readContent(context, annotationInstance.value(Parameterizable.PROP_CONTENT),
+                            ContentDirection.PARAMETER));
+            parameter.setExamples(ExampleReader.readExamples(context, annotationInstance.value(Parameterizable.PROP_EXAMPLES)));
+            parameter.setExample(
+                    ExampleReader.parseValue(context,
+                            context.annotations().value(annotationInstance, Parameterizable.PROP_EXAMPLE)));
+            parameter.setRef(JandexUtil.refValue(annotationInstance, JandexUtil.RefType.PARAMETER));
 
-        return parameter;
+            if (annotationInstance.target() != null) {
+                switch (annotationInstance.target().kind()) {
+                    case FIELD:
+                    case METHOD_PARAMETER:
+                        /*
+                         * Limit to field and parameter. Extensions on methods are ambiguous and pertain
+                         * instead to the operation.
+                         *
+                         */
+                        parameter.setExtensions(ExtensionReader.readExtensions(context, annotationInstance));
+                        break;
+                    default:
+                        break;
+                }
+
+                parameter.setParamRef(JandexUtil.createUniqueAnnotationTargetRef(annotationInstance.target()));
+            }
+
+            return parameter;
+        } else {
+            return null;
+        }
     }
 
     /**

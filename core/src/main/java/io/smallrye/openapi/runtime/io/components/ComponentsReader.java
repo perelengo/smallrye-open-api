@@ -56,7 +56,8 @@ public class ComponentsReader {
         components.setHeaders(HeaderReader.readHeaders(context, nested.value(ComponentsConstant.PROP_HEADERS)));
         components.setLinks(LinkReader.readLinks(context, nested.value(ComponentsConstant.PROP_LINKS)));
         components.setParameters(
-                ParameterReader.readParameters(context, nested.value(ComponentsConstant.PROP_PARAMETERS)));
+                ParameterReader.readParameters(context, nested.value(ComponentsConstant.PROP_PARAMETERS),
+                        java.util.Optional.empty())); //FIXME
         components.setRequestBodies(RequestBodyReader.readRequestBodies(context,
                 nested.value(ComponentsConstant.PROP_REQUEST_BODIES)));
         components.setResponses(

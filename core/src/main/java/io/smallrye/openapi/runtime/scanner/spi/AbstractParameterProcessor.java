@@ -43,6 +43,10 @@ import org.jboss.jandex.MethodParameterInfo;
 import org.jboss.jandex.PrimitiveType.Primitive;
 import org.jboss.jandex.Type;
 
+import com.github.therapi.runtimejavadoc.BaseJavadoc;
+import com.github.therapi.runtimejavadoc.MethodJavadoc;
+import com.github.therapi.runtimejavadoc.ParamJavadoc;
+
 import io.smallrye.openapi.api.models.media.ContentImpl;
 import io.smallrye.openapi.api.models.media.EncodingImpl;
 import io.smallrye.openapi.api.models.media.MediaTypeImpl;
@@ -59,6 +63,7 @@ import io.smallrye.openapi.runtime.scanner.dataobject.AugmentedIndexView;
 import io.smallrye.openapi.runtime.scanner.dataobject.BeanValidationScanner;
 import io.smallrye.openapi.runtime.scanner.dataobject.TypeResolver;
 import io.smallrye.openapi.runtime.util.JandexUtil;
+import io.smallrye.openapi.runtime.util.JavadocUtils;
 import io.smallrye.openapi.runtime.util.ModelUtil;
 import io.smallrye.openapi.runtime.util.TypeUtil;
 
@@ -130,6 +135,7 @@ public abstract class AbstractParameterProcessor {
         protected Object defaultValue;
         protected AnnotationTarget target;
         protected Type targetType;
+        public Object javadoc;
 
         ParameterContext() {
         }
@@ -141,6 +147,10 @@ public abstract class AbstractParameterProcessor {
             this.frameworkParam = frameworkParam;
             this.target = target;
             this.targetType = targetType;
+        }
+
+        public void setJavadoc(Object javadoc) {
+            this.javadoc = javadoc;
         }
 
         @Override
@@ -237,7 +247,8 @@ public abstract class AbstractParameterProcessor {
         matrixParams.clear();
     }
 
-    protected ResourceParameters process(ClassInfo resourceClass, MethodInfo resourceMethod) {
+    protected ResourceParameters process(ClassInfo resourceClass, MethodInfo resourceMethod,
+            Optional<MethodJavadoc> methodJavadoc) {
 
         ResourceParameters parameters = new ResourceParameters();
 
@@ -248,7 +259,7 @@ public abstract class AbstractParameterProcessor {
 
         processOperationParameters(resourceMethod, parameters);
 
-        processFinalize(resourceClass, resourceMethod, parameters);
+        processFinalize(resourceClass, resourceMethod, parameters, methodJavadoc);
 
         return parameters;
     }
@@ -287,7 +298,8 @@ public abstract class AbstractParameterProcessor {
         parameters.setOperationParameters(getParameters(resourceMethod));
     }
 
-    protected void processFinalize(ClassInfo resourceClass, MethodInfo resourceMethod, ResourceParameters parameters) {
+    protected void processFinalize(ClassInfo resourceClass, MethodInfo resourceMethod, ResourceParameters parameters,
+            Optional<MethodJavadoc> methodJavadoc) {
         /*
          * Working list of all parameters.
          */
@@ -307,6 +319,18 @@ public abstract class AbstractParameterProcessor {
                 .map(pip -> this.mapParameter(resourceMethod, pip))
                 .forEach(parameters::addOperationParameter);
 
+        for (Parameter parameter : allParameters) {
+            if (methodJavadoc.isPresent() && (parameter.getDescription() == null || parameter.getDescription().isEmpty())) {
+                List<ParamJavadoc> paramsJavadoc = methodJavadoc.get().getParams();
+                Optional<ParamJavadoc> paramJavadoc = paramsJavadoc.stream().filter(p -> {
+                    return JavadocUtils.matches(p, parameter);
+                }).findAny();
+                if (paramJavadoc.isPresent()) {
+                    String javadocDescription = paramJavadoc.get().getComment().toString();
+                    parameter.setDescription(javadocDescription);
+                }
+            }
+        }
         // Re-sort (names of matrix parameters may have changed)
         parameters.sort(preferredOrder);
 
@@ -506,7 +530,13 @@ public abstract class AbstractParameterProcessor {
         if (isIgnoredParameter(param, resourceMethod)) {
             return null;
         }
-
+        if (context.javadoc != null) {
+            //ParamJavadoc and other javadocs don't share the same hierarchy
+            if (context.javadoc instanceof BaseJavadoc)
+                param.setDescription(((BaseJavadoc) context.javadoc).getComment().toString());
+            else if (context.javadoc instanceof ParamJavadoc)
+                param.setDescription(((ParamJavadoc) context.javadoc).getComment().toString());
+        }
         mapParameterStyle(param, context);
         mapParameterSchema(param, context);
         TypeUtil.mapDeprecated(scannerContext, context.target, param::getDeprecated, param::setDeprecated);
@@ -1281,11 +1311,11 @@ public abstract class AbstractParameterProcessor {
                 null,
                 null,
                 annotation.target(),
-                overriddenParametersOnly);
+                overriddenParametersOnly, Optional.empty());
     }
 
     protected void readFrameworkParameter(AnnotationInstance annotation, FrameworkParameter frameworkParam,
-            boolean overriddenParametersOnly) {
+            boolean overriddenParametersOnly, Optional<Object> javadoc) {
         AnnotationTarget target = annotation.target();
 
         readParameter(
@@ -1294,7 +1324,8 @@ public abstract class AbstractParameterProcessor {
                 frameworkParam,
                 getDefaultValue(target),
                 target,
-                overriddenParametersOnly);
+                overriddenParametersOnly,
+                javadoc);
     }
 
     /**
@@ -1317,13 +1348,15 @@ public abstract class AbstractParameterProcessor {
      * @param defaultValue value read from the framework's default-value annotation.
      * @param target target of the annotation
      * @param overriddenParametersOnly true if only parameters already known to the scanner are considered, false otherwise
+     * @param javadoc
      */
     protected void readParameter(ParameterContextKey key,
             Parameter oaiParam,
             FrameworkParameter frameworkParam,
             Object defaultValue,
             AnnotationTarget target,
-            boolean overriddenParametersOnly) {
+            boolean overriddenParametersOnly,
+            Optional<Object> javadoc) {
 
         //TODO: Test to ensure @Parameter attributes override framework for the same parameter
         //      (unless @Parameter was already specified at a "lower" level)
@@ -1373,6 +1406,9 @@ public abstract class AbstractParameterProcessor {
         }
 
         if (addParam) {
+            if (javadoc.isPresent()) {
+                context.setJavadoc(javadoc.get());
+            }
             params.put(new ParameterContextKey(context), context);
         }
 

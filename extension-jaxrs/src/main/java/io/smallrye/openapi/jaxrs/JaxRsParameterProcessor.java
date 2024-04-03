@@ -4,6 +4,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.regex.Pattern;
@@ -16,9 +17,15 @@ import org.jboss.jandex.AnnotationInstance;
 import org.jboss.jandex.AnnotationTarget;
 import org.jboss.jandex.ClassInfo;
 import org.jboss.jandex.DotName;
+import org.jboss.jandex.FieldInfo;
 import org.jboss.jandex.MethodInfo;
 import org.jboss.jandex.MethodParameterInfo;
 import org.jboss.jandex.Type;
+
+import com.github.therapi.runtimejavadoc.ClassJavadoc;
+import com.github.therapi.runtimejavadoc.FieldJavadoc;
+import com.github.therapi.runtimejavadoc.MethodJavadoc;
+import com.github.therapi.runtimejavadoc.ParamJavadoc;
 
 import io.smallrye.openapi.api.models.media.EncodingImpl;
 import io.smallrye.openapi.runtime.io.parameter.ParameterConstant;
@@ -28,6 +35,7 @@ import io.smallrye.openapi.runtime.scanner.dataobject.TypeResolver;
 import io.smallrye.openapi.runtime.scanner.spi.AbstractParameterProcessor;
 import io.smallrye.openapi.runtime.scanner.spi.AnnotationScannerContext;
 import io.smallrye.openapi.runtime.scanner.spi.FrameworkParameter;
+import io.smallrye.openapi.runtime.util.JavadocUtils;
 import io.smallrye.openapi.runtime.util.TypeUtil;
 
 /**
@@ -76,10 +84,11 @@ public class JaxRsParameterProcessor extends AbstractParameterProcessor {
             ClassInfo resourceClass,
             MethodInfo resourceMethod,
             Function<AnnotationInstance, Parameter> reader,
-            List<AnnotationScannerExtension> extensions) {
+            List<AnnotationScannerExtension> extensions,
+            Optional<MethodJavadoc> methodJavadoc) {
 
         JaxRsParameterProcessor processor = new JaxRsParameterProcessor(context, contextPath, reader, extensions);
-        return processor.process(resourceClass, resourceMethod);
+        return processor.process(resourceClass, resourceMethod, methodJavadoc);
     }
 
     @Override
@@ -169,7 +178,54 @@ public class JaxRsParameterProcessor extends AbstractParameterProcessor {
             FrameworkParameter frameworkParam = JaxRsParameter.forName(name);
 
             if (frameworkParam != null) {
-                readJaxRsParameter(annotation, frameworkParam, beanParamAnnotation, overriddenParametersOnly);
+                Optional<Object> javadoc = Optional.empty();
+
+                if (annotation.target() instanceof MethodParameterInfo) {
+                    MethodParameterInfo paramInfo = ((MethodParameterInfo) annotation.target().asMethodParameter());
+                    MethodInfo methodInfo = paramInfo.method();
+                    ClassInfo classInfo = methodInfo.declaringClass();
+
+                    ClassLoader loader;
+                    try {
+                        loader = scannerContext.getClassLoader().loadClass(classInfo.name().toString()).getClassLoader();
+                    } catch (ClassNotFoundException e) {
+                        e.printStackTrace();
+                        loader = null;
+                    }
+                    ClassJavadoc classJavaDoc = JavadocUtils.loadJavadoc(loader, classInfo);
+                    if (classJavaDoc != null) {
+                        Optional<MethodJavadoc> methodJavaDoc = classJavaDoc.getMethods().stream().filter(m -> {
+                            return JavadocUtils.matches(m, methodInfo);
+                        }).findAny();
+                        if (methodJavaDoc.isPresent()) {
+                            Optional<ParamJavadoc> paramJavadoc = methodJavaDoc.get().getParams().stream().filter(p -> {
+                                return JavadocUtils.matches(p, annotation.target().asMethodParameter());
+                            }).findAny();
+                            if (paramJavadoc.isPresent())
+                                javadoc = Optional.of((Object) paramJavadoc.get());
+                        }
+                    }
+                } else {
+                    FieldInfo fieldInfo = ((FieldInfo) annotation.target().asField());
+                    ClassInfo classInfo = fieldInfo.declaringClass();
+
+                    ClassLoader loader;
+                    try {
+                        loader = scannerContext.getClassLoader().loadClass(classInfo.name().toString()).getClassLoader();
+                    } catch (ClassNotFoundException e) {
+                        e.printStackTrace();
+                        loader = null;
+                    }
+                    ClassJavadoc classJavaDoc = JavadocUtils.loadJavadoc(loader, classInfo);
+                    if (classJavaDoc != null) {
+                        Optional<FieldJavadoc> fieldJavaDoc = classJavaDoc.getFields().stream().filter(m -> {
+                            return JavadocUtils.matches(m, fieldInfo);
+                        }).findAny();
+                        if (fieldJavaDoc.isPresent())
+                            javadoc = Optional.of((Object) fieldJavaDoc.get());
+                    }
+                }
+                readJaxRsParameter(annotation, frameworkParam, beanParamAnnotation, overriddenParametersOnly, javadoc);
             }
         }
     }
@@ -177,7 +233,7 @@ public class JaxRsParameterProcessor extends AbstractParameterProcessor {
     private void readJaxRsParameter(AnnotationInstance annotation,
             FrameworkParameter frameworkParam,
             AnnotationInstance beanParamAnnotation,
-            boolean overriddenParametersOnly) {
+            boolean overriddenParametersOnly, Optional<Object> javadoc) {
 
         AnnotationTarget target = annotation.target();
         Type targetType = getType(target);
@@ -185,7 +241,7 @@ public class JaxRsParameterProcessor extends AbstractParameterProcessor {
         if (frameworkParam.style == Style.FORM) {
             // Store the @FormParam for later processing
             formParams.put(paramName(annotation), annotation);
-            readFrameworkParameter(annotation, frameworkParam, overriddenParametersOnly);
+            readFrameworkParameter(annotation, frameworkParam, overriddenParametersOnly, javadoc);
         } else if (frameworkParam.style == Style.MATRIX) {
             // Store the @MatrixParam for later processing
             String pathSegment = beanParamAnnotation != null
@@ -199,7 +255,7 @@ public class JaxRsParameterProcessor extends AbstractParameterProcessor {
             String pathSegment = scannerContext.annotations().value(annotation, ParameterConstant.PROP_VALUE);
             matrixParams.computeIfAbsent(pathSegment, k -> new HashMap<>());
         } else if (frameworkParam.location != null) {
-            readFrameworkParameter(annotation, frameworkParam, overriddenParametersOnly);
+            readFrameworkParameter(annotation, frameworkParam, overriddenParametersOnly, javadoc);
         } else if (target != null) {
             // This is a @BeanParam or a RESTEasy @MultipartForm
             setMediaType(frameworkParam);
